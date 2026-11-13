@@ -1,0 +1,56 @@
+name: build-pkg
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        default: MyApp
+      titleid:
+        default: HTML00001
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OO_PS4_TOOLKIT: ${{ github.workspace }}/toolchain
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y clang lld unzip
+
+      - name: Get OpenOrbis toolchain
+        run: |
+          mkdir -p toolchain && cd toolchain
+          gh release download -R OpenOrbis/OpenOrbis-PS4-Toolchain --pattern '*linux*' || \
+          gh release download -R OpenOrbis/OpenOrbis-PS4-Toolchain
+          for f in *.zip; do unzip -oq "$f"; done || true
+
+      - name: Compile
+        run: |
+          T=$OO_PS4_TOOLKIT
+          clang++ -target x86_64-pc-freebsd12-elf -fPIC -funwind-tables \
+            -I$T/include -I$T/include/c++/v1 -c src/main.cpp -o main.o
+          ld.lld -m elf_x86_64 -pie --script $T/link.x --eh-frame-hdr \
+            -L$T/lib $T/lib/crt1.o main.o -lc -lc++ -lkernel -lSceSystemService -o eboot.elf
+
+      - name: Make PKG
+        run: |
+          T=$OO_PS4_TOOLKIT
+          mkdir -p pkg/sce_sys
+          $T/bin/linux/create-fself -in=eboot.elf -out=pkg/eboot.bin --eboot=pkg/eboot.bin --paid 0x3800000000000011
+          $T/bin/linux/PkgTool.Core sfo_new pkg/sce_sys/param.sfo || true
+          $T/bin/linux/PkgTool.Core sfo_setentry pkg/sce_sys/param.sfo TITLE --type Utf8 --maxsize 128 --value "${{ inputs.name }}"
+          $T/bin/linux/PkgTool.Core sfo_setentry pkg/sce_sys/param.sfo TITLE_ID --type Utf8 --maxsize 12 --value "${{ inputs.titleid }}"
+          $T/bin/linux/PkgTool.Core sfo_setentry pkg/sce_sys/param.sfo CONTENT_ID --type Utf8 --maxsize 48 --value "IV0000-${{ inputs.titleid }}_00-0000000000000000"
+          cd pkg && $T/bin/linux/create-gp4 -out ../app.gp4 --content-id="IV0000-${{ inputs.titleid }}_00-0000000000000000" --files "eboot.bin sce_sys/param.sfo"
+          cd .. && $T/bin/linux/PkgTool.Core pkg_build app.gp4 .
+
+      - name: Publish release
+        run: |
+          gh release delete latest -y --cleanup-tag || true
+          gh release create latest *.pkg --title "latest" --notes "auto build"
