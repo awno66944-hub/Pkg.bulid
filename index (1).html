@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CPP → PKG</title>
+<style>
+  body{font-family:system-ui,sans-serif;background:#0f1115;color:#eee;max-width:640px;margin:0 auto;padding:16px}
+  h1{font-size:20px}
+  label{display:block;margin:12px 0 4px;font-size:14px;color:#9aa}
+  input,textarea{width:100%;box-sizing:border-box;background:#1a1d24;color:#eee;border:1px solid #333;border-radius:8px;padding:10px;font-family:monospace}
+  textarea{height:200px;direction:ltr}
+  button{margin-top:14px;width:100%;padding:12px;border:0;border-radius:8px;background:#3b82f6;color:#fff;font-size:16px}
+  button:disabled{opacity:.5}
+  pre{background:#1a1d24;border-radius:8px;padding:10px;white-space:pre-wrap;direction:ltr;min-height:60px}
+  a{color:#7dd3fc}
+</style>
+</head>
+<body>
+<h1>حوّل ملف CPP إلى PKG</h1>
+
+<label>الريبو (owner/name)</label>
+<input id="repo" placeholder="raw13g/pkg-builder">
+
+<label>GitHub Token (صلاحية Contents + Actions)</label>
+<input id="token" type="password" placeholder="github_pat_...">
+
+<label>اسم التطبيق</label>
+<input id="name" value="MyApp">
+
+<label>Title ID (9 حروف)</label>
+<input id="titleid" value="HTML00001" maxlength="9">
+
+<label>ملف cpp</label>
+<input id="file" type="file" accept=".cpp,.cc,.c">
+<textarea id="code" placeholder="أو الصق الكود هنا"></textarea>
+
+<button id="go">ابنِ الـ PKG</button>
+<pre id="log"></pre>
+
+<script>
+const $ = id => document.getElementById(id);
+const log = m => { $('log').textContent += m + '\n'; };
+const b64 = s => btoa(unescape(encodeURIComponent(s)));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function gh(path, opt = {}) {
+  const r = await fetch('https://api.github.com/repos/' + $('repo').value.trim() + path, {
+    ...opt,
+    headers: {
+      Authorization: 'Bearer ' + $('token').value.trim(),
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json'
+    }
+  });
+  if (!r.ok && r.status !== 404) throw new Error(r.status + ' ' + await r.text());
+  return r;
+}
+
+$('file').onchange = async e => {
+  const f = e.target.files[0];
+  if (f) $('code').value = await f.text();
+};
+
+$('go').onclick = async () => {
+  const btn = $('go');
+  btn.disabled = true;
+  $('log').textContent = '';
+  try {
+    if (!$('code').value.trim()) throw new Error('ما في كود');
+    const started = Date.now();
+
+    log('1) أرفع src/main.cpp ...');
+    const cur = await gh('/contents/src/main.cpp');
+    const sha = cur.status === 200 ? (await cur.json()).sha : undefined;
+    await gh('/contents/src/main.cpp', {
+      method: 'PUT',
+      body: JSON.stringify({ message: 'update main.cpp', content: b64($('code').value), sha })
+    });
+
+    log('2) أشغل البناء ...');
+    await gh('/actions/workflows/build-pkg.yml/dispatches', {
+      method: 'POST',
+      body: JSON.stringify({ ref: 'main', inputs: { name: $('name').value, titleid: $('titleid').value } })
+    });
+
+    log('3) انتظر الـ PKG (يأخذ دقيقتين تقريبا) ...');
+    for (let i = 0; i < 60; i++) {
+      await sleep(8000);
+      const r = await gh('/releases/tags/latest');
+      if (r.status === 200) {
+        const rel = await r.json();
+        if (new Date(rel.published_at).getTime() > started - 5000 && rel.assets.length) {
+          rel.assets.forEach(a => {
+            const link = document.createElement('a');
+            link.href = a.browser_download_url;
+            link.textContent = '⬇ ' + a.name;
+            link.target = '_blank';
+            $('log').appendChild(document.createTextNode('\n'));
+            $('log').appendChild(link);
+          });
+          log('\nجاهز ✅');
+          btn.disabled = false;
+          return;
+        }
+      }
+    }
+    log('انتهى الوقت، شوف تبويب Actions في الريبو.');
+  } catch (e) {
+    log('خطأ: ' + e.message);
+  }
+  btn.disabled = false;
+};
+</script>
+</body>
+</html>
